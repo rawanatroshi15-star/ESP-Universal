@@ -47,6 +47,7 @@ local DEFAULTS = {
     -- 🎯 الأيم بوت
     AimEnabled = false, AimFOVCircle = true, AimWallCheck = true,
     AimSticky = false, AimBots = false, AimFOV = 150, AimSmooth = 6,
+    AimMousePct = 100,
     MaxDistance = 2000,
 }
 local PREF_DEFAULTS = {
@@ -57,6 +58,7 @@ local PREF_DEFAULTS = {
     TrailColorIdx = 1,           -- 1 = سماوي
     AimPartIdx = 1,              -- 1 = الرأس
     AimKeyIdx = 1,               -- 1 = زر الماوس الأيمن
+    AimMethodIdx = 1,            -- 1 = حركة الماوس (الأفضل)، 2 = الكاميرا مباشرة
     LastTab = 1,                 -- 🆕 V24: آخر تبويب مفتوح
 }
 
@@ -87,6 +89,7 @@ local LOOT_FILTERS = {"الكل", "أسلحة/أدوات", "ذخيرة/علاج"
 local TOGGLE_KEYS = {"RightShift", "Insert", "RightControl", "Home", "End", "Delete"}
 local AIM_PARTS = {"الرأس", "الصدر", "الأقرب للمؤشر"}
 local AIM_KEYS  = {"زر الماوس الأيمن", "زر الماوس الأيسر", "تلقائي (دائماً)"}
+local AIM_METHODS = {"حركة الماوس", "الكاميرا"}
 
 -- 🆕 V24: تعريف التبويبات (لإضافة تبويب جديد أضف سطراً هنا فقط)
 local TAB_DEFS = {
@@ -112,6 +115,7 @@ local function applyPrefs()
     Prefs.LastTab = math.clamp(math.floor(Prefs.LastTab), 1, #TAB_DEFS)
     Prefs.AimPartIdx = math.clamp(math.floor(Prefs.AimPartIdx), 1, #AIM_PARTS)
     Prefs.AimKeyIdx = math.clamp(math.floor(Prefs.AimKeyIdx), 1, #AIM_KEYS)
+    Prefs.AimMethodIdx = math.clamp(math.floor(Prefs.AimMethodIdx), 1, #AIM_METHODS)
     local valid = false
     for _, k in ipairs(TOGGLE_KEYS) do
         if k == Prefs.ToggleKey then valid = true end
@@ -154,6 +158,7 @@ local function loadConfig()
     Config.MaxDistance = math.clamp(Config.MaxDistance, 100, 5000)
     Config.AimFOV = math.clamp(Config.AimFOV, 20, 600)
     Config.AimSmooth = math.clamp(Config.AimSmooth, 1, 20)
+    Config.AimMousePct = math.clamp(Config.AimMousePct, 30, 300)
 
     if type(data.prefs) == "table" then
         for k, def in pairs(PREF_DEFAULTS) do
@@ -1081,6 +1086,12 @@ createChoice(aimPage,
     function() return Color3.fromRGB(110, 70, 70) end,
     function() Prefs.AimPartIdx = (Prefs.AimPartIdx % #AIM_PARTS) + 1 end)
 
+createChoice(aimPage,
+    "🧲 طريقة التصويب",
+    function() return AIM_METHODS[Prefs.AimMethodIdx] end,
+    function() return Color3.fromRGB(70, 110, 80) end,
+    function() Prefs.AimMethodIdx = (Prefs.AimMethodIdx % #AIM_METHODS) + 1 end)
+
 createSection(aimPage, "الاستهداف")
 createToggle(aimPage, "🧱", "Wall Check", "AimWallCheck")
 createToggle(aimPage, "📌", "تثبيت الهدف", "AimSticky")
@@ -1090,6 +1101,7 @@ createSection(aimPage, "FOV والنعومة")
 createToggle(aimPage, "⭕", "إظهار دائرة FOV", "AimFOVCircle")
 createValueSlider(aimPage, "⭕ حجم FOV", "AimFOV", 20, 600, 10, " px")
 createValueSlider(aimPage, "🐢 النعومة (1 = فوري)", "AimSmooth", 1, 20, 1, "")
+createValueSlider(aimPage, "🖱️ قوة حركة الماوس", "AimMousePct", 30, 300, 10, "%")
 
 -- ============================================================
 -- 🌍 تبويب العالم
@@ -2894,6 +2906,29 @@ do
     local circleStroke = addStroke(circle, Color3.new(1, 1, 1), 1.2)
     local lastFov = nil
 
+    -- 🖱️ تحريك الماوس الحقيقي (تتبعه اللعبة: الكاميرا + اليد + السلاح)
+    local mouseMoveFn = (typeof(mousemoverel) == "function") and mousemoverel or nil
+    local accX, accY = 0, 0            -- الباقي الكسري من حركة الماوس بين الفريمات
+    local MAX_STEP = 150               -- أقصى حركة ماوس في فريم واحد
+    local sensT, sensV = 99, 1
+
+    -- كم بكسل على الشاشة تتحرك الكاميرا لكل وحدة ماوس (تقدير حسب حساسية روبلوكس + FOV)
+    local function mouseGain(dt)
+        sensT = sensT + dt
+        if sensT >= 1 then
+            sensT = 0
+            local s = 1
+            pcall(function()
+                s = UserSettings():GetService("UserGameSettings").MouseSensitivity
+            end)
+            if type(s) == "number" and s > 0 then sensV = s else sensV = 1 end
+        end
+        local fovHalf = math.rad(math.clamp(Camera.FieldOfView, 10, 120) / 2)
+        local pxPerRad = (Camera.ViewportSize.Y / 2) / math.tan(fovHalf)
+        return math.max(0.5, 0.002 * math.pi * pxPerRad * sensV),
+               math.max(0.5, 0.0015 * math.pi * pxPerRad * sensV)
+    end
+
     local rayParams = RaycastParams.new()
     rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
@@ -2994,6 +3029,7 @@ do
 
         if not Config.AimEnabled or not isActive() then
             Aim.lock = nil
+            accX, accY = 0, 0
             circleStroke.Color = Color3.new(1, 1, 1)
             return
         end
@@ -3032,11 +3068,34 @@ do
         end
         circleStroke.Color = Color3.fromRGB(255, 60, 60)
 
-        local cf = Camera.CFrame
-        local goal = CFrame.lookAt(cf.Position, part.Position)
         local sm = Config.AimSmooth
         local alpha = (sm <= 1) and 1 or (1 - math.exp(-dt * 60 / sm))
-        Camera.CFrame = cf:Lerp(goal, alpha)
+
+        if Prefs.AimMethodIdx == 1 and mouseMoveFn then
+            -- الطريقة 1: تحريك الماوس فعلياً، فتتبعه اللعبة نفسها (اليد والسلاح يصوّبون معه)
+            local sp = Camera:WorldToViewportPoint(part.Position)
+            local ex, ey = sp.X - center.X, sp.Y - center.Y
+            if math.abs(ex) < 1 and math.abs(ey) < 1 then
+                accX, accY = 0, 0
+                return
+            end
+
+            local gx, gy = mouseGain(dt)
+            local mul = Config.AimMousePct / 100
+            local mx = math.clamp(ex * alpha * mul / gx + accX, -MAX_STEP, MAX_STEP)
+            local my = math.clamp(ey * alpha * mul / gy + accY, -MAX_STEP, MAX_STEP)
+            local ix = (mx >= 0) and math.floor(mx) or math.ceil(mx)
+            local iy = (my >= 0) and math.floor(my) or math.ceil(my)
+            accX, accY = mx - ix, my - iy
+            if ix ~= 0 or iy ~= 0 then
+                pcall(mouseMoveFn, ix, iy)
+            end
+        else
+            -- الطريقة 2 (احتياطية): تدوير الكاميرا مباشرة
+            local cf = Camera.CFrame
+            local goal = CFrame.lookAt(cf.Position, part.Position)
+            Camera.CFrame = cf:Lerp(goal, alpha)
+        end
     end
 end
 
