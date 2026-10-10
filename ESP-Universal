@@ -47,7 +47,7 @@ local DEFAULTS = {
     -- 🎯 الأيم بوت
     AimEnabled = false, AimFOVCircle = true, AimWallCheck = true,
     AimSticky = false, AimBots = false, AimFOV = 150, AimSmooth = 6,
-    AimMousePct = 100,
+    AimMousePct = 100, AimFaceChar = true,
     MaxDistance = 2000,
 }
 local PREF_DEFAULTS = {
@@ -88,8 +88,9 @@ local TRAIL_PALETTE = {
 local LOOT_FILTERS = {"الكل", "أسلحة/أدوات", "ذخيرة/علاج", "نقود", "صناديق/موارد"}
 local TOGGLE_KEYS = {"RightShift", "Insert", "RightControl", "Home", "End", "Delete"}
 local AIM_PARTS = {"الرأس", "الصدر", "الأقرب للمؤشر"}
-local AIM_KEYS  = {"زر الماوس الأيمن", "زر الماوس الأيسر", "تلقائي (دائماً)"}
+local AIM_KEYS  = {"زر الماوس الأيمن", "زر الماوس الأيسر", "تلقائي (دائماً)", "زر على الشاشة"}
 local AIM_METHODS = {"حركة الماوس", "الكاميرا"}
+local HAS_MOUSEMOVE = typeof(mousemoverel) == "function"   -- غير موجودة عادة على الهاتف
 
 -- 🆕 V24: تعريف التبويبات (لإضافة تبويب جديد أضف سطراً هنا فقط)
 local TAB_DEFS = {
@@ -324,6 +325,10 @@ local function killScript()
     for _, e in pairs(botCache) do destroyVisuals(e.visuals) end
     for _, e in pairs(vehicles) do destroyVehicle(e) end
     if Loot.destroyAll then pcall(Loot.destroyAll) end
+    if env.UniversalESP_AimCleanup then
+        pcall(env.UniversalESP_AimCleanup)
+        env.UniversalESP_AimCleanup = nil
+    end
     entries, botCache, vehicles = {}, {}, {}
     pcall(function() screenGui:Destroy() end)
     if env.UniversalESP_Kill == killScript then env.UniversalESP_Kill = nil end
@@ -1088,7 +1093,10 @@ createChoice(aimPage,
 
 createChoice(aimPage,
     "🧲 طريقة التصويب",
-    function() return AIM_METHODS[Prefs.AimMethodIdx] end,
+    function()
+        if Prefs.AimMethodIdx == 1 and not HAS_MOUSEMOVE then return "الكاميرا (تلقائي)" end
+        return AIM_METHODS[Prefs.AimMethodIdx]
+    end,
     function() return Color3.fromRGB(70, 110, 80) end,
     function() Prefs.AimMethodIdx = (Prefs.AimMethodIdx % #AIM_METHODS) + 1 end)
 
@@ -1096,6 +1104,7 @@ createSection(aimPage, "الاستهداف")
 createToggle(aimPage, "🧱", "Wall Check", "AimWallCheck")
 createToggle(aimPage, "📌", "تثبيت الهدف", "AimSticky")
 createToggle(aimPage, "🤖", "تصويب على البوتات", "AimBots")
+createToggle(aimPage, "🧍", "الشخصية تواجه الهدف", "AimFaceChar")
 
 createSection(aimPage, "FOV والنعومة")
 createToggle(aimPage, "⭕", "إظهار دائرة FOV", "AimFOVCircle")
@@ -2994,16 +3003,104 @@ do
         return m.X >= p.X and m.X <= p.X + s.X and m.Y >= p.Y and m.Y <= p.Y + s.Y
     end
 
+    -- 📱 جهاز لمس بدون ماوس: أزرار الماوس لا تعمل، فنستخدم زر AIM على الشاشة
+    local touchOnly = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+    local function effectiveKey()
+        local k = Prefs.AimKeyIdx
+        if touchOnly and k < 3 then return 4 end
+        return k
+    end
+
+    -- زر AIM على الشاشة: اضغط لتشغيله/إيقافه، واسحبه لتغيير مكانه
+    local aimOn = false
+    local aimBtn = Instance.new("TextButton")
+    aimBtn.Size = UDim2.fromOffset(54, 54)
+    do
+        local vpv = viewport()
+        aimBtn.Position = UDim2.fromOffset(math.max(2, vpv.X - 140), math.floor(vpv.Y * 0.45))
+    end
+    aimBtn.Text = "AIM"
+    aimBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    aimBtn.TextColor3 = Color3.new(1, 1, 1)
+    aimBtn.Font = Enum.Font.GothamBold
+    aimBtn.TextSize = 13
+    aimBtn.AutoButtonColor = false
+    aimBtn.Visible = false
+    aimBtn.ZIndex = 90
+    aimBtn.Parent = screenGui
+    addCorner(aimBtn, 27)
+    local aimBtnStroke = addStroke(aimBtn, Color3.new(1, 1, 1), 1.5)
+
+    local function paintAimBtn()
+        aimBtn.BackgroundColor3 = aimOn and Color3.fromRGB(200, 50, 50) or Color3.fromRGB(60, 60, 60)
+        aimBtnStroke.Color = aimOn and Color3.fromRGB(255, 120, 120) or Color3.new(1, 1, 1)
+    end
+
+    local aDown, aMoved = nil, false
+    aimBtn.InputBegan:Connect(function(input)
+        if isPress(input) then aDown, aMoved = input.Position, false end
+    end)
+    aimBtn.InputEnded:Connect(function(input)
+        if isPress(input) then
+            if aDown and not aMoved and Running then
+                aimOn = not aimOn
+                paintAimBtn()
+            end
+            aDown = nil
+        end
+    end)
+    track(UserInputService.InputChanged:Connect(function(input)
+        if aDown and isMove(input) and (input.Position - aDown).Magnitude > 10 then
+            aMoved = true
+        end
+    end))
+    makeDraggable(aimBtn, aimBtn)
+
     local function isActive()
         if UserInputService:GetFocusedTextBox() then return false end
         if dragging or overMenu() then return false end
-        local k = Prefs.AimKeyIdx
+        local k = effectiveKey()
         if k == 1 then
             return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
         elseif k == 2 then
             return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+        elseif k == 4 then
+            return aimOn
         end
         return true
+    end
+
+    -- 🧍 جعل الشخصية تواجه الهدف حتى تتبعها اليد والسلاح (يعمل مع طريقة الكاميرا)
+    local faceActive = false
+
+    local function restoreFace()
+        if not faceActive then return end
+        faceActive = false
+        local mc = LocalPlayer.Character
+        local mh = mc and mc:FindFirstChildOfClass("Humanoid")
+        if mh then mh.AutoRotate = true end
+    end
+    env.UniversalESP_AimCleanup = restoreFace
+
+    local function faceTarget(targetPos, alpha)
+        local mc = LocalPlayer.Character
+        if not mc then return end
+        local hrp = mc:FindFirstChild("HumanoidRootPart")
+        local mh = mc:FindFirstChildOfClass("Humanoid")
+        if not hrp or not mh or mh.Health <= 0 or mh.SeatPart then
+            restoreFace()
+            return
+        end
+        local dir = targetPos - hrp.Position
+        local flat = Vector3.new(dir.X, 0, dir.Z)
+        if flat.Magnitude < 0.5 then return end
+        if mh.AutoRotate then
+            mh.AutoRotate = false
+            faceActive = true
+        end
+        local goal = CFrame.lookAt(hrp.Position, hrp.Position + flat)
+        hrp.CFrame = hrp.CFrame:Lerp(goal, math.max(alpha, 0.35))
     end
 
     -- حالة البحث عن أقرب هدف (متغيرات خارجية لتجنب إنشاء closures كل فريم)
@@ -3022,6 +3119,8 @@ do
         local fov = Config.AimFOV
         local showCircle = Config.AimEnabled and Config.AimFOVCircle
         if circle.Visible ~= showCircle then circle.Visible = showCircle end
+        local wantBtn = Config.AimEnabled and effectiveKey() == 4
+        if aimBtn.Visible ~= wantBtn then aimBtn.Visible = wantBtn end
         if showCircle and lastFov ~= fov then
             lastFov = fov
             circle.Size = UDim2.fromOffset(fov * 2, fov * 2)
@@ -3030,6 +3129,7 @@ do
         if not Config.AimEnabled or not isActive() then
             Aim.lock = nil
             accX, accY = 0, 0
+            restoreFace()
             circleStroke.Color = Color3.new(1, 1, 1)
             return
         end
@@ -3063,6 +3163,7 @@ do
         end
 
         if not part then
+            restoreFace()
             circleStroke.Color = Color3.new(1, 1, 1)
             return
         end
@@ -3095,6 +3196,13 @@ do
             local cf = Camera.CFrame
             local goal = CFrame.lookAt(cf.Position, part.Position)
             Camera.CFrame = cf:Lerp(goal, alpha)
+
+            -- الشخصية تواجه الهدف: اليد والسلاح تتبعها بدل ما تبقى متحركة
+            if Config.AimFaceChar then
+                faceTarget(part.Position, alpha)
+            else
+                restoreFace()
+            end
         end
     end
 end
